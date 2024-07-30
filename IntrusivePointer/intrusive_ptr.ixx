@@ -1,39 +1,40 @@
-module;
-
-#include <chrono>
-#include <functional>
-#include <future>
-#include <mutex>
-#include <queue>
-#include <thread>
-#include <utility>
-#include <vector>
-
 export module intrusive_ptr;
+
+import std;
 
 constexpr static std::chrono::milliseconds sleep_for_time{ 9 };
 
 using start_time_t = decltype(std::chrono::high_resolution_clock::now());
 
+static void move_into_container(auto& container, auto begin, auto end) {
+	container.insert(
+		container.end(),
+		std::make_move_iterator(begin),
+		std::make_move_iterator(end));
+}
+
 //SINGLETON INSTANCE
 class daemon_thread {
 	std::jthread _t;
 	std::mutex destroyers_mutex;
-	std::vector<std::function<bool(const start_time_t&)>> destroyers;
+	std::vector<std::function<void()>> destroyers_locked;
+	std::vector<std::function<void()>> destroyers;
 
 	void garbage_collection_loop() {
 		while (true) {
 			{
 				std::unique_lock lk{ destroyers_mutex };
-				if (destroyers.size() > 0) {
-					using namespace std::chrono;
-					auto start = high_resolution_clock::now();
-					for (auto&& can_continue_destroying : destroyers) {
-						if (!can_continue_destroying(start)) break;
-					}
+				if (destroyers_locked.size() > 0) {
+					move_into_container(destroyers, destroyers_locked.begin(), destroyers_locked.end());
+					destroyers_locked.clear();
 				}
 			}
 
+			using namespace std::chrono;
+			auto start = high_resolution_clock::now();
+			for (auto&& d : destroyers) {
+				d();
+			}
 			std::this_thread::sleep_for(sleep_for_time);
 		}
 	}
@@ -51,7 +52,7 @@ public:
 	template <typename Callback>
 	void add_destroyer(Callback&& c) requires std::predicate<Callback, const start_time_t&> {
 		std::unique_lock lk{ destroyers_mutex };
-		destroyers.push_back(std::forward<Callback>(c));
+		destroyers_locked.push_back(std::forward<Callback>(c));
 	}
 
 	static daemon_thread& instance() {
@@ -158,11 +159,22 @@ public:
 	bool owner_before(const intrusive_ptr<U>& other) const noexcept { return _inner.owner_before(other._inner); }
 };
 
+auto keep_alive = [](const auto& p) { return p.use_count() <= 0; };
+
+static void keep_alive_in_next_gen(auto& container, auto& next_gen) {
+	auto first_to_remove = std::partition(container.begin(), container.end(), keep_alive);
+	move_into_container(next_gen, container.begin(), first_to_remove);
+}
+
 //SINGLETON INSTANCE per type 'T'
 template <typename T>
 class add_destroyer_impl {
 	std::mutex d_mutex{};
 	std::deque<intrusive_ptr<T>> d{};
+	std::deque<intrusive_ptr<T>> gen1{};
+	std::deque<intrusive_ptr<T>> gen2{};
+	int gen1_skips = 0;
+	int gen2_skips = 0;
 
 	constexpr static bool has_garbage_collection_time_remaining(const start_time_t& start) {
 		using namespace std::chrono_literals;
@@ -171,30 +183,37 @@ class add_destroyer_impl {
 	}
 
 	auto destroy_items_callback() {
-		return [this](const start_time_t& start) {
-			std::vector<intrusive_ptr<T>> erase_container;
+		return [this, keep_alive]() {
+			std::deque<intrusive_ptr<T>> erase_container;
 			{
 				std::unique_lock lk{ d_mutex };
-				auto remove_at = std::remove_if(d.begin(), d.end(), [](const auto& p) { return p.use_count() <= 0; });
-				if (remove_at != d.end()) {
-					std::move(remove_at, d.end(), std::back_inserter{ erase_container });
-					d.erase(remove_at, d.end());
-				}
+				d.swap(erase_container);
 			}
 
-			return true;
-			/*std::unique_lock lk{ d_mutex };
-			for (auto current = d.begin(); current != d.end(); ++current) {
-				while (current->use_count() <= 0 && current != d.end()) {
-					*current = std::move(d.back());
-					d.pop_back();
-					if (!has_garbage_collection_time_remaining(start)) return false;
-				}
+			keep_alive_in_next_gen(erase_container, gen1);
+			erase_container.clear();
+			++gen1_skips;
 
-				if (!has_garbage_collection_time_remaining(start)) return false;
+			if (gen1_skips < 10) {
+				return;
 			}
 
-			return true;*/
+			gen1_skips = 0;
+			gen1.swap(erase_container);
+			keep_alive_in_next_gen(erase_container, gen2);
+			erase_container.clear();
+			++gen2_skips;
+
+			if (gen2_skips < 10) {
+				return;
+			}
+
+			gen2_skips = 0;
+			gen2.swap(erase_container);
+			auto first_to_remove = std::partition(erase_container.begin(), erase_container.end(), keep_alive);
+			gen2.erase(first_to_remove, gen2.end());
+
+			return;
 		};
 	}
 
