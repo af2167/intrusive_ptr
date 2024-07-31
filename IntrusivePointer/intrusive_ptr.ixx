@@ -2,16 +2,7 @@ export module intrusive_ptr;
 
 import std;
 
-constexpr static std::chrono::milliseconds sleep_for_time{ 9 };
-
 using start_time_t = decltype(std::chrono::high_resolution_clock::now());
-
-static void move_into_container(auto& container, auto begin, auto end) {
-	container.insert(
-		container.end(),
-		std::make_move_iterator(begin),
-		std::make_move_iterator(end));
-}
 
 //SINGLETON INSTANCE
 class daemon_thread {
@@ -22,20 +13,17 @@ class daemon_thread {
 
 	void garbage_collection_loop() {
 		while (true) {
-			{
+			if (destroyers_locked.size() > 0) {
 				std::unique_lock lk{ destroyers_mutex };
 				if (destroyers_locked.size() > 0) {
-					move_into_container(destroyers, destroyers_locked.begin(), destroyers_locked.end());
+					std::ranges::move(destroyers_locked, std::back_inserter(destroyers));
 					destroyers_locked.clear();
 				}
 			}
 
-			using namespace std::chrono;
-			auto start = high_resolution_clock::now();
 			for (auto&& d : destroyers) {
 				d();
 			}
-			std::this_thread::sleep_for(sleep_for_time);
 		}
 	}
 
@@ -159,66 +147,54 @@ public:
 	bool owner_before(const intrusive_ptr<U>& other) const noexcept { return _inner.owner_before(other._inner); }
 };
 
-auto keep_alive = [](const auto& p) { return p.use_count() <= 0; };
-
-static void keep_alive_in_next_gen(auto& container, auto& next_gen) {
-	auto first_to_remove = std::partition(container.begin(), container.end(), keep_alive);
-	move_into_container(next_gen, container.begin(), first_to_remove);
-}
+auto is_dead = [](const auto& p) { return p.use_count() <= 0; };
 
 //SINGLETON INSTANCE per type 'T'
 template <typename T>
 class add_destroyer_impl {
 	std::mutex d_mutex{};
-	std::deque<intrusive_ptr<T>> d{};
-	std::deque<intrusive_ptr<T>> gen1{};
-	std::deque<intrusive_ptr<T>> gen2{};
+	std::vector<intrusive_ptr<T>> d{};
+	std::vector<intrusive_ptr<T>> gen1{};
+	std::vector<intrusive_ptr<T>> gen2{};
 	int gen1_skips = 0;
 	int gen2_skips = 0;
 
-	constexpr static bool has_garbage_collection_time_remaining(const start_time_t& start) {
-		using namespace std::chrono_literals;
-		using namespace std::chrono;
-		return duration_cast<std::chrono::milliseconds>(high_resolution_clock::now() - start) >= 1ms;
-	}
+	constexpr add_destroyer_impl() {
+		daemon_thread::instance().add_destroyer([this]() {
+			std::vector<intrusive_ptr<T>> move_to_next_gen;
 
-	auto destroy_items_callback() {
-		return [this, keep_alive]() {
-			std::deque<intrusive_ptr<T>> erase_container;
 			{
 				std::unique_lock lk{ d_mutex };
-				d.swap(erase_container);
+				move_to_next_gen.reserve(d.size());
+				d.swap(move_to_next_gen);
 			}
 
-			keep_alive_in_next_gen(erase_container, gen1);
-			erase_container.clear();
+			std::erase_if(move_to_next_gen, is_dead);
 			++gen1_skips;
 
 			if (gen1_skips < 10) {
+				std::ranges::move(move_to_next_gen, std::back_inserter(gen1));
 				return;
 			}
 
 			gen1_skips = 0;
-			gen1.swap(erase_container);
-			keep_alive_in_next_gen(erase_container, gen2);
-			erase_container.clear();
+
+			move_to_next_gen.reserve(gen1.size());
+			gen1.swap(move_to_next_gen);
+
+			std::erase_if(move_to_next_gen, is_dead);
 			++gen2_skips;
+
+			std::ranges::move(move_to_next_gen, std::back_inserter(gen2));
 
 			if (gen2_skips < 10) {
 				return;
 			}
 
 			gen2_skips = 0;
-			gen2.swap(erase_container);
-			auto first_to_remove = std::partition(erase_container.begin(), erase_container.end(), keep_alive);
-			gen2.erase(first_to_remove, gen2.end());
 
-			return;
-		};
-	}
-
-	constexpr add_destroyer_impl() {
-		daemon_thread::instance().add_destroyer(destroy_items_callback());
+			std::erase_if(gen2, is_dead);
+		});
 	}
 
 public:
