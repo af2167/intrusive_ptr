@@ -2,8 +2,6 @@ export module intrusive_ptr;
 
 import std;
 
-using start_time_t = decltype(std::chrono::high_resolution_clock::now());
-
 //SINGLETON INSTANCE
 class daemon_thread {
 	std::jthread _t;
@@ -11,8 +9,17 @@ class daemon_thread {
 	std::vector<std::function<void()>> destroyers_locked;
 	std::vector<std::function<void()>> destroyers;
 
-	void garbage_collection_loop() {
+	void garbage_collection_loop(std::stop_token stoken) {
 		while (true) {
+			if (stoken.stop_requested()) {
+				return;
+			}
+
+			if (destroyers_locked.size() == 0 && destroyers.size() == 0) {
+				using namespace std::literals::chrono_literals;
+				std::this_thread::sleep_for(1ms);
+			}
+
 			if (destroyers_locked.size() > 0) {
 				std::unique_lock lk{ destroyers_mutex };
 				if (destroyers_locked.size() > 0) {
@@ -27,7 +34,7 @@ class daemon_thread {
 		}
 	}
 
-	daemon_thread() noexcept : _t{ [this]() { garbage_collection_loop(); } } {}
+	daemon_thread() noexcept : _t{ [this](std::stop_token stoken) { garbage_collection_loop(stoken); } } {}
 
 public:
 	daemon_thread(const daemon_thread&) = delete;
@@ -38,7 +45,7 @@ public:
 	~daemon_thread() = default;
 
 	template <typename Callback>
-	void add_destroyer(Callback&& c) requires std::predicate<Callback, const start_time_t&> {
+	void add_destroyer(Callback&& c) {
 		std::unique_lock lk{ destroyers_mutex };
 		destroyers_locked.push_back(std::forward<Callback>(c));
 	}
@@ -47,7 +54,18 @@ public:
 		static daemon_thread _instance{};
 		return _instance;
 	}
+
+	void stop() {
+		_t.request_stop();
+	}
 };
+
+export void stop_garbage_collector() {
+	daemon_thread::instance().stop();
+}
+
+template <typename T>
+class add_destroyer_impl;
 
 class create_underlying {};
 
@@ -59,11 +77,11 @@ class intrusive_ptr {
 	std::shared_ptr<T> _inner;
 
 	template <typename ... Args>
-	intrusive_ptr(create_underlying, Args&& ... args) : _inner{ std::forward<Args>(args)... } {}
+	intrusive_ptr(create_underlying, Args&& ... args) : _inner{ std::make_shared<T>(std::forward<Args>(args)...) } {}
 
 public:
 	friend class weak_intrusive_ref<T>;
-	friend class std::deque<intrusive_ptr<T>>;
+	friend class add_destroyer_impl<T>;
 
 	intrusive_ptr() = delete;
 	intrusive_ptr(const intrusive_ptr&) = default;
@@ -78,8 +96,13 @@ public:
 		return *this;
 	}
 
-	template <typename ... Args>
-	intrusive_ptr(Args&& ...);
+	intrusive_ptr(std::nullptr_t) : _inner{ nullptr } {}
+
+	template <typename Other> requires(!std::same_as<intrusive_ptr<T>, std::remove_cvref_t<Other>>)
+		intrusive_ptr(Other&&);
+
+	template <typename First, typename Second, typename ... Args> requires(!std::same_as<create_underlying, std::remove_cvref_t<First>>)
+		intrusive_ptr(First&&, Second&&, Args&&...);
 
 	void swap(intrusive_ptr& other) {
 		_inner.swap(other._inner);
@@ -106,7 +129,7 @@ class weak_intrusive_ref {
 public:
 	friend class intrusive_ptr<T>;
 
-	constexpr weak_intrusive_ref() noexcept = default;
+	weak_intrusive_ref() noexcept = default;
 	weak_intrusive_ref(const weak_intrusive_ref& r) noexcept = default;
 	weak_intrusive_ref(weak_intrusive_ref&& r) noexcept = default;
 	~weak_intrusive_ref() = default;
@@ -159,7 +182,7 @@ class add_destroyer_impl {
 	int gen1_skips = 0;
 	int gen2_skips = 0;
 
-	constexpr add_destroyer_impl() {
+	add_destroyer_impl() {
 		daemon_thread::instance().add_destroyer([this]() {
 			std::vector<intrusive_ptr<T>> move_to_next_gen;
 
@@ -208,7 +231,9 @@ public:
 	template <typename ... Args>
 	auto operator()(Args&& ... args) {
 		std::unique_lock lk{ d_mutex };
-		return d.emplace_back(create_underlying{}, std::forward<decltype(args)>(args)...);
+		auto ptr = intrusive_ptr<T>{ create_underlying{}, std::forward<decltype(args)>(args)... };
+		d.push_back(ptr);
+		return ptr;
 	}
 
 	static add_destroyer_impl& instance() {
@@ -223,5 +248,9 @@ intrusive_ptr<T> make_intrusive_ptr(Args&& ... args) {
 }
 
 template <typename T>
-template <typename ... Args>
-intrusive_ptr<T>::intrusive_ptr(Args&& ... args) : _inner{ std::move(make_intrusive_ptr<T>(std::forward<Args>(args)...)._inner) } {}
+template <typename Other> requires(!std::same_as<intrusive_ptr<T>, std::remove_cvref_t<Other>>)
+intrusive_ptr<T>::intrusive_ptr(Other&& other) : _inner{ std::move(make_intrusive_ptr<T>(std::forward<Other>(other))._inner) } {}
+
+template <typename T>
+template <typename First, typename Second, typename ... Args> requires(!std::same_as<create_underlying, std::remove_cvref_t<First>>)
+intrusive_ptr<T>::intrusive_ptr(First&& f, Second&& s, Args&& ... args) : _inner{ std::move(make_intrusive_ptr<T>(std::forward<First>(f), std::forward<Second>(s), std::forward<Args>(args)...)._inner) } {}
