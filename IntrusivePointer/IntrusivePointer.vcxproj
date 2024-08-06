@@ -142,6 +142,8 @@
   <ItemGroup>
     <ClCompile Include="intrusive_ptr.ixx" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="thread_protected.ixx" />
+    <ClCompile Include="ptr_tracking.ixx" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
