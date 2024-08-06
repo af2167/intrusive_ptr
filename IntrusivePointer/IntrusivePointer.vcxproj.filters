@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="intrusive_ptr.ixx">
+    <ClCompile Include="tracked_ptr.ixx">
       <Filter>Header Files</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">

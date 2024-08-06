@@ -1,21 +1,22 @@
 import std;
-import intrusive_ptr;
+import tracked_ptr;
 
 import ptr_tracking;
 
-void test() {
+static void test() {
 	using namespace std::string_literals;
-	auto vec = std::vector<intrusive_ptr<std::string>>{};
+	auto vec = std::vector<tracked_ptr<std::string>>{};
 
-	vec.emplace_back("Hello World");
+	vec.emplace_back(make_intrusive_ptr<std::string>("Hello World"));
 
-	auto c = vec.emplace_back(17, 'c');
+	//intentional copy
+	auto c = vec.emplace_back(make_intrusive_ptr<std::string>(17, 'c'));
 
-	vec.emplace_back("End of the world as we know it!"s);
+	vec.emplace_back(make_intrusive_ptr<std::string>("End of the world as we know it!"s));
 
-	vec.push_back("THIS IS SPARTA");
+	vec.push_back(make_intrusive_ptr<std::string>("THIS IS SPARTA"));
 
-	auto empty = intrusive_ptr<std::string>{ "" };
+	auto empty = make_intrusive_ptr<std::string>("");
 	vec.push_back(empty);
 	*empty += "this string was created empty";
 
@@ -23,6 +24,7 @@ void test() {
 	for (auto ptr : vec) {
 		std::println("{}", *ptr);
 	}
+	vec.clear();
 
 	std::println("{}", *c);
 }
@@ -33,6 +35,7 @@ static void test_tracking() {
 
 	vec.push_back(std::make_shared<std::string>("Hello World"));
 
+	//intentional copy
 	auto c = vec.emplace_back(tracked::make_tracked_ptr<std::string>(17, 'c'));
 
 	vec.emplace_back(tracked::make_tracked_ptr<std::string>("End of the world as we know it!"s));
@@ -47,15 +50,13 @@ static void test_tracking() {
 	for (auto ptr : vec) {
 		std::println("{}", *ptr);
 	}
+	vec.clear();
 
 	std::println("{}", *c);
 }
 
 int main() {
+	test();
+
 	test_tracking();
-
-	//test();
-
-	////Is there a way to avoid this?
-	//stop_garbage_collector();
 }
